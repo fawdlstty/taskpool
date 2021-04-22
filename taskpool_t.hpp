@@ -57,9 +57,10 @@ public:
 	}
 
 	template<class F, class... Args>
-	auto run (F &&f, Args&&... args) ->std::future<decltype(f (args...))> {
-		auto _task = std::make_shared<std::packaged_task<decltype(f (args...))>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<decltype(f (args...))> _res = _task->get_future ();
+	auto run (F &&f, Args&&... args) ->std::future<typename std::result_of<F (Args...)>::type> {
+		using _ret_type = typename std::result_of<F (Args...)>::type;
+		auto _task = std::make_shared<std::packaged_task<_ret_type ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
+		std::future<_ret_type> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::mutex> ul (m_mutex);
 			m_tasks.emplace ([_task] () { (*_task)(); });
@@ -68,9 +69,10 @@ public:
 	}
 
 	template<class F, class... Args>
-	auto run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) ->std::future<decltype(f (args...))> {
-		auto _task = std::make_shared<std::packaged_task<decltype(f (args...))>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<decltype(f (args...))> _res = _task->get_future ();
+	auto run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) ->std::future<typename std::result_of<F (Args...)>::type> {
+		using _ret_type = typename std::result_of<F (Args...)>::type;
+		auto _task = std::make_shared<std::packaged_task<_ret_type ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
+		std::future<_ret_type> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::mutex> ul (m_mutex);
 			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
