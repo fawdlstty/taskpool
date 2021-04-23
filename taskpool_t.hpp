@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <functional>
 #include <mutex>
@@ -29,7 +30,7 @@ public:
 						while (m_run.load ()) {
 							ul.lock ();
 							if (_timed_trigger ()) {
-								_task = std::get<1> (m_timed_tasks [1]);
+								_task = std::get<1> (m_timed_tasks [0]);
 								m_timed_tasks.erase (m_timed_tasks.begin ());
 								break;
 							} else if (!m_tasks.empty ()) {
@@ -56,11 +57,11 @@ public:
 			_worker.join ();
 	}
 
-	template<class F, class... Args>
+	template<typename F, typename... Args>
 	auto run (F &&f, Args&&... args) ->std::future<typename std::result_of<F (Args...)>::type> {
-		using _ret_type = typename std::result_of<F (Args...)>::type;
-		auto _task = std::make_shared<std::packaged_task<_ret_type ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<_ret_type> _res = _task->get_future ();
+		using TRet = typename std::result_of<F (Args...)>::type;
+		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
+		std::future<TRet> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::mutex> ul (m_mutex);
 			m_tasks.emplace ([_task] () { (*_task)(); });
@@ -68,11 +69,11 @@ public:
 		return _res;
 	}
 
-	template<class F, class... Args>
+	template<typename F, typename... Args>
 	auto run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) ->std::future<typename std::result_of<F (Args...)>::type> {
-		using _ret_type = typename std::result_of<F (Args...)>::type;
-		auto _task = std::make_shared<std::packaged_task<_ret_type ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<_ret_type> _res = _task->get_future ();
+		using TRet = typename std::result_of<F (Args...)>::type;
+		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
+		std::future<TRet> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::mutex> ul (m_mutex);
 			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
@@ -91,6 +92,26 @@ public:
 		auto _tp = std::chrono::system_clock::now () + _chr;
 		return run_until (_tp, f, args...);
 	}
+
+	//template<typename T, typename F>
+	//auto append_after (std::future<T> &&_future, F &&f) ->std::future<typename std::result_of<F (T)>::type> {
+	//	using TRet = typename std::result_of<F (T)>::type;
+	//	auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<T> (_future.get ())));
+	//	std::future<TRet> _res = _task->get_future ();
+	//	[&] () {
+	//		std::unique_lock<std::mutex> ul (m_mutex);
+	//		std::function<void ()> _f;
+	//		_f = [&] () {
+	//			if (_future.valid ()) {
+	//				(*_task)();
+	//			} else {
+	//				run_for (10, _f);
+	//			}
+	//		};
+	//		m_tasks.emplace (_f);
+	//	} ();
+	//	return _res;
+	//}
 
 private:
 	bool _timed_trigger () {
