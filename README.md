@@ -17,13 +17,12 @@ taskpool_t _pool { 1 };
 auto _ret1 = _pool.run ([] (int answer) { return answer; }, 42);
 std::cout << _ret1.get () << std::endl;
 
-// 指定五秒后执行一个任务，并等待结果
-auto _ret2 = _pool.run_until (std::chrono::system_clock::now () + std::chrono::seconds (5), [] (int answer) { return answer; }, 42);
-// 等价于：auto _ret2 = _pool.run_for (std::chrono::seconds (5), [] (int answer) { return answer; }, 42);
-std::cout << _ret2.get () << std::endl;
-
 // 执行串联任务（一个任务完成后，再执行下一个任务）
-auto _future = _pool.run_for (std::chrono::seconds (3), [] () -> int { return 42; });
-_pool.append_after (std::move (_future), [] (int n) -> int { std::cout << n << std::endl; return 0; });
+auto _f0 = _pool.wait (std::chrono::seconds (3));
+auto _f1 = _pool.after_wait (std::move (_f0), std::chrono::seconds (3));
+auto _f2 = _pool.after_run (std::move (_f1), [] () { std::cout << "1\n"; return 2; });
+auto _f3 = _pool.after_wait (std::move (_f2), std::chrono::seconds (3));
+auto _f4 = _pool.after_run (std::move (_f3), [] (int n) { return n + 10; });
+auto _f5 = _pool.after_run (std::move (_f4), [] (int n) { std::cout << n << "\n"; });
 std::cout << "main end\n";
 ```
