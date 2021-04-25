@@ -22,12 +22,8 @@ class taskpool_t {
 	class _future_wrap_t {
 	public:
 		_future_wrap_t (std::future<T> &&_future): m_future (std::move (_future)) {}
-		bool valid () const noexcept {
-			return m_future.wait_for (std::chrono::milliseconds (0)) == std::future_status::ready;
-		}
-		T get () {
-			return m_future.get ();
-		}
+		bool valid () const noexcept { return m_future.wait_for (std::chrono::milliseconds (0)) == std::future_status::ready; }
+		T get () { return m_future.get (); }
 
 	private:
 		std::future<T> m_future;
@@ -38,25 +34,38 @@ public:
 		m_run.store (true);
 		for (size_t i = 0; i < _threads; ++i) {
 			m_workers.emplace_back ([this] {
+				bool _first_timed = true;
 				while (true) {
+					_first_timed = !_first_timed;
 					std::function<void ()> _task;
 					[&] () {
 						std::unique_lock<std::mutex> ul2 (m_wait_mutex);
 						std::unique_lock<std::recursive_mutex> ul (m_mutex, std::defer_lock);
 						while (m_run.load ()) {
 							ul.lock ();
-							if (_timed_trigger ()) {
-								_task = std::get<1> (m_timed_tasks [0]);
-								m_timed_tasks.erase (m_timed_tasks.begin ());
-								break;
-							} else if (!m_tasks.empty ()) {
-								_task = std::move (m_tasks.front ());
-								m_tasks.pop ();
-								break;
+							if (_first_timed) {
+								if (_timed_trigger ()) {
+									_task = std::get<1> (m_timed_tasks [0]);
+									m_timed_tasks.erase (m_timed_tasks.begin ());
+									break;
+								} else if (!m_tasks.empty ()) {
+									_task = std::move (m_tasks.front ());
+									m_tasks.pop ();
+									break;
+								}
 							} else {
-								ul.unlock ();
-								std::this_thread::sleep_for (std::chrono::milliseconds (1));
+								if (!m_tasks.empty ()) {
+									_task = std::move (m_tasks.front ());
+									m_tasks.pop ();
+									break;
+								} else if (_timed_trigger ()) {
+									_task = std::get<1> (m_timed_tasks [0]);
+									m_timed_tasks.erase (m_timed_tasks.begin ());
+									break;
+								}
 							}
+							ul.unlock ();
+							std::this_thread::sleep_for (std::chrono::milliseconds (1));
 						}
 					} ();
 					if (!m_run.load ()) {
@@ -74,6 +83,8 @@ public:
 			_worker.join ();
 	}
 
+	// run
+
 	template<typename F, typename... Args>
 	auto run (F &&f, Args&&... args) -> std::future<decltype (f (args...))> {
 		using TRet = decltype (f (args...));
@@ -87,7 +98,7 @@ public:
 	}
 
 	template<typename F>
-	auto after_run (std::future<void> &&_future, F &&f) ->std::future<decltype (f ())> {
+	auto after_run (std::future<void> &&_future, F &&f) -> std::future<decltype (f ())> {
 		using TRet = decltype (f ());
 		auto _future_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future));
 		std::shared_ptr<std::promise<TRet>> _promise = std::make_shared<std::promise<TRet>> ();
@@ -101,24 +112,24 @@ public:
 	}
 
 	template<typename F, typename T>
-	auto after_run (std::future<T> &&_future, F &&f) ->std::future<decltype (f (_future.get ()))> {
+	auto after_run (std::future<T> &&_future, F &&f) -> std::future<decltype (f (_future.get ()))> {
 		using TRet = decltype (f (_future.get ()));
 		auto _future_wrap = std::make_shared<_future_wrap_t<T>> (std::move (_future));
 		std::shared_ptr<std::promise<TRet>> _promise = std::make_shared<std::promise<TRet>> ();
-		std::future<TRet> _res = _promise->get_future ();
 		if constexpr (std::is_void<TRet>::value) {
 			_wait_forward_noret<F, T> (std::forward<F> (f), _future_wrap, _promise);
 		} else {
 			_wait_forward<F, T> (std::forward<F> (f), _future_wrap, _promise);
 		}
-		return _res;
+		return _promise->get_future ();
 	}
+
+	// wait
 
 	template<typename _Rep, typename _Period>
 	std::future<void> wait (const std::chrono::duration<_Rep, _Period> &_chr) {
 		auto _tp = std::chrono::system_clock::now () + _chr;
 		auto _task = std::make_shared<std::packaged_task<void ()>> ([] () {});
-		std::future<void> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::recursive_mutex> ul (m_mutex);
 			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
@@ -129,14 +140,13 @@ public:
 			}
 			m_timed_tasks.push_back (std::make_tuple (_tp, [_task] () { (*_task)(); }));
 		} ();
-		return _res;
+		return _task->get_future ();
 	}
 
 	template<typename _Rep, typename _Period, typename T>
 	std::future<T> wait (T &&t, const std::chrono::duration<_Rep, _Period> &_chr) {
 		auto _tp = std::chrono::system_clock::now () + _chr;
 		auto _task = std::make_shared<std::packaged_task<T ()>> (std::bind ([] (const T &t) { return std::move (t); }, std::move (t)));
-		std::future<T> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::recursive_mutex> ul (m_mutex);
 			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
@@ -147,27 +157,56 @@ public:
 			}
 			m_timed_tasks.push_back (std::make_tuple (_tp, [_task] () { (*_task)(); }));
 		} ();
-		return _res;
+		return _task->get_future ();
 	}
 
 	template<typename _Rep, typename _Period>
 	std::future<void> after_wait (std::future<void> &&_future, const std::chrono::duration<_Rep, _Period> &_chr) {
 		auto _future_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future));
 		std::shared_ptr<std::promise<void>> _promise = std::make_shared<std::promise<void>> ();
-		std::future<void> _res = _promise->get_future ();
 		auto _f = [this, _chr] () { return wait<_Rep, _Period> (_chr); };
 		_wait_forward2_noret<decltype (_f)> (std::move (_f), _future_wrap, _promise);
-		return _res;
+		return _promise->get_future ();
 	}
 
 	template<typename _Rep, typename _Period, typename T>
 	std::future<T> after_wait (std::future<T> &&_future, const std::chrono::duration<_Rep, _Period> &_chr) {
 		auto _future_wrap = std::make_shared<_future_wrap_t<T>> (std::move (_future));
 		std::shared_ptr<std::promise<T>> _promise = std::make_shared<std::promise<T>> ();
-		std::future<T> _res = _promise->get_future ();
 		auto _f = [this, _chr] (T &&t) { return wait<_Rep, _Period, T> (std::move (t), _chr); };
 		_wait_forward2<decltype (_f), T> (std::move (_f), _future_wrap, _promise);
-		return _res;
+		return _promise->get_future ();
+	}
+
+	// lock
+
+	std::future<void> lock (std::shared_ptr<std::mutex> _mutex) {
+		std::shared_ptr<std::promise<void>> _promise = std::make_shared<std::promise<void>> ();
+		_loop_try_lock1 (_mutex, _promise);
+		return _promise->get_future ();
+	}
+
+private:
+	template <typename T>
+	std::future<T> lock (T &&t, std::shared_ptr<std::mutex> _mutex) {
+		std::shared_ptr<std::promise<T>> _promise = std::make_shared<std::promise<T>> ();
+		_loop_try_lock<T> (_mutex, _promise, std::move (t));
+		return _promise->get_future ();
+	}
+
+public:
+	template <typename T>
+	std::future<T> after_lock (std::future<T> &&_future, std::shared_ptr<std::mutex> _mutex) {
+		auto _future_wrap = std::make_shared<_future_wrap_t<T>> (std::move (_future));
+		std::shared_ptr<std::promise<T>> _promise = std::make_shared<std::promise<T>> ();
+		if constexpr (std::is_void<T>::value) {
+			auto _f = [=] () { return lock (_mutex); };
+			_wait_forward2_noret<decltype (_f)> (std::move (_f), _future_wrap, _promise);
+		} else {
+			auto _f = [=] (T &&t) { return lock<T> (std::move (t), _mutex); };
+			_wait_forward2<decltype (_f), T> (std::move (_f), _future_wrap, _promise);
+		}
+		return _promise->get_future ();
 	}
 
 private:
@@ -175,7 +214,6 @@ private:
 	auto _run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) -> std::future<decltype (f (args...))> {
 		using TRet = decltype (f (args...));
 		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<TRet> _res = _task->get_future ();
 		[&] () {
 			std::unique_lock<std::recursive_mutex> ul (m_mutex);
 			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
@@ -186,7 +224,7 @@ private:
 			}
 			m_timed_tasks.push_back (std::make_tuple (_tp, [_task] () { (*_task)(); }));
 		} ();
-		return _res;
+		return _task->get_future ();
 	}
 
 	template <typename _Rep, typename _Period, typename F, typename... Args>
@@ -199,6 +237,25 @@ private:
 		if (m_timed_tasks.empty ())
 			return false;
 		return std::chrono::system_clock::now () >= std::get<0> (m_timed_tasks [0]);
+	}
+
+	void _loop_try_lock1 (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<std::promise<void>> _promise) {
+		if (_mutex->try_lock ()) {
+			_promise->set_value ();
+		} else {
+			std::function<void ()> _func = std::bind (&taskpool_t::_loop_try_lock1, this, std::move (_mutex), std::move (_promise));
+			_run_for (std::chrono::milliseconds (1), _func);
+		}
+	}
+
+	template<typename T>
+	void _loop_try_lock (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<std::promise<T>> _promise, const T &t) {
+		if (_mutex->try_lock ()) {
+			_promise->set_value (std::move (t));
+		} else {
+			std::function<void ()> _func = std::bind (&taskpool_t::_loop_try_lock<T>, this, std::move (_mutex), std::move (_promise), std::move (t));
+			_run_for (std::chrono::milliseconds (1), _func);
+		}
 	}
 
 	template<typename F>
