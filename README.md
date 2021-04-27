@@ -26,5 +26,14 @@ auto _f2 = _pool.async_after_run (std::move (_f1), [] () { std::cout << "1\n"; r
 auto _f3 = _pool.async_after_wait (std::move (_f2), std::chrono::seconds (3));
 auto _f4 = _pool.async_after_run (std::move (_f3), [] (int n) { return n + 10; });
 auto _f5 = _pool.async_after_run (std::move (_f4), [] (int n) { std::cout << n << "\n"; });
-std::cout << "main end\n";
+std::cout << "Hello World!\n";
+
+// async locker (The code in a lambda expression runs in multithreaded synchronization)
+// 异步锁（lambda表达式中的代码处于多线程同步运行）
+auto _lock = std::make_shared<std::mutex> ();
+auto _f0 = _pool.sync_run (_lock, [] () { std::cout << "1\n"; });
+auto _f1 = _pool.sync_after_run (std::move (_f0), _lock, [] () { std::cout << "2\n"; return 3; });
+auto _f2 = _pool.sync_after_run (std::move (_f1), _lock, [] (int n) { std::cout << n << "\n"; return 4; });
+auto _f3 = _pool.sync_after_run (std::move (_f2), _lock, [] (int n) { std::cout << n << "\n"; });
+std::cout << "Hello World!\n";
 ```
