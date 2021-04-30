@@ -29,6 +29,48 @@ class taskpool_t {
 		std::future<T> m_future;
 	};
 
+	class _futures_wrap_t {
+	public:
+		_futures_wrap_t (std::vector<std::future<void>> &&_futures): m_futures (std::move (_futures)) {}
+		bool valid () const noexcept {
+			for (const std::future<void> &_future : m_futures) {
+				if (_future.wait_for (std::chrono::milliseconds (0)) != std::future_status::ready)
+					return false;
+			}
+			return true;
+		}
+		void get () {
+			for (std::future<void> &_future : m_futures)
+				_future.get ();
+		}
+
+	private:
+		std::vector<std::future<void>> m_futures;
+	};
+
+	template<typename T>
+	class _futures_wrap_t {
+	public:
+		_futures_wrap_t (std::vector<std::future<T>> &&_futures): m_futures (std::move (_futures)) {}
+		bool valid () const noexcept {
+			for (const std::future<T> &_future : m_futures) {
+				if (_future.wait_for (std::chrono::milliseconds (0)) != std::future_status::ready)
+					return false;
+			}
+			return true;
+		}
+		std::vector<T> get () {
+			std::vector<T> _v;
+			_v.reserve (m_futures.size ());
+			for (std::future<T> &_future : m_futures)
+				_v.emplace_back (_future.get ());
+			return _v;
+		}
+
+	private:
+		std::vector<std::future<T>> m_futures;
+	};
+
 public:
 	taskpool_t (size_t _threads) {
 		m_run.store (true);
@@ -178,6 +220,18 @@ public:
 		return _promise->get_future ();
 	}
 
+	//std::future<void> async_wait_all (std::vector<std::future<void>> &&_futures) {
+	//	auto _futures_wrap = std::make_shared<_futures_wrap_t> (std::move (_futures));
+	//	auto _promise = std::make_shared<std::promise<void>> ();
+	//	auto _check_func = [_futures_wrap, _promise] () {};
+	//	// TODO
+	//}
+
+	//template<typename T>
+	//std::future<std::vector<T>> async_wait_all (std::vector<std::future<T>> &&_futures) {
+
+	//}
+
 	// sync_run
 
 	template<typename F, typename... Args>
@@ -227,6 +281,8 @@ public:
 	}
 
 private:
+	// private methods
+
 	template<typename F, typename... Args>
 	auto _run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) -> std::future<decltype (f (args...))> {
 		using TRet = decltype (f (args...));
