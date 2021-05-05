@@ -13,6 +13,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 
@@ -29,9 +30,9 @@ class taskpool_t {
 		std::future<T> m_future;
 	};
 
-	class _futures_wrap_t {
+	class _futures_wrap0_t {
 	public:
-		_futures_wrap_t (std::vector<std::future<void>> &&_futures): m_futures (std::move (_futures)) {}
+		_futures_wrap0_t (std::vector<std::future<void>> &&_futures): m_futures (std::move (_futures)) {}
 		bool valid () const noexcept {
 			for (const std::future<void> &_future : m_futures) {
 				if (_future.wait_for (std::chrono::milliseconds (0)) != std::future_status::ready)
@@ -129,14 +130,7 @@ public:
 
 	template<typename F, typename... Args>
 	auto async_run (F &&f, Args&&... args) -> std::future<decltype (f (args...))> {
-		using TRet = decltype (f (args...));
-		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		std::future<TRet> _res = _task->get_future ();
-		[&] () {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([_task] () { (*_task)(); });
-		} ();
-		return _res;
+		return _run_task_get_future (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
 	}
 
 	template<typename F>
@@ -220,17 +214,20 @@ public:
 		return _promise->get_future ();
 	}
 
-	//std::future<void> async_wait_all (std::vector<std::future<void>> &&_futures) {
-	//	auto _futures_wrap = std::make_shared<_futures_wrap_t> (std::move (_futures));
-	//	auto _promise = std::make_shared<std::promise<void>> ();
-	//	auto _check_func = [_futures_wrap, _promise] () {};
-	//	// TODO
-	//}
+	std::future<void> async_wait_all (std::vector<std::future<void>> &&_futures) {
+		auto _futures_wrap = std::make_shared<_futures_wrap0_t> (std::move (_futures));
+		auto _promise = std::make_shared<std::promise<void>> ();
+		_wait_all0 (_futures_wrap, _promise);
+		return _promise->get_future ();
+	}
 
-	//template<typename T>
-	//std::future<std::vector<T>> async_wait_all (std::vector<std::future<T>> &&_futures) {
-
-	//}
+	template<typename T>
+	std::future<std::vector<T>> async_wait_all (std::vector<std::future<T>> &&_futures) {
+		auto _futures_wrap = std::make_shared<_futures_wrap_t<T>> (std::move (_futures));
+		auto _promise = std::make_shared<std::promise<std::vector<T>>> ();
+		_wait_all<T> (_futures_wrap, _promise);
+		return _promise->get_future ();
+	}
 
 	// sync_run
 
@@ -239,14 +236,11 @@ public:
 		using TRet = decltype (f (args...));
 		std::shared_ptr<std::promise<TRet>> _promise = std::make_shared<std::promise<TRet>> ();
 		std::function<TRet ()> _f = std::bind (std::forward<F> (f), std::forward<Args> (args)...);
-		[&] () {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			if constexpr (std::is_void<TRet>::value) {
-				m_tasks.emplace (std::bind (&taskpool_t::_wait_sync_run_noret<decltype (_f)>, this, _mutex, _promise, std::move (_f)));
-			} else {
-				m_tasks.emplace (std::bind (&taskpool_t::_wait_sync_run<decltype (_f), TRet>, this, _mutex, _promise, std::move (_f)));
-			}
-		} ();
+		if constexpr (std::is_void<TRet>::value) {
+			_wait_sync_run_noret<decltype (_f)> (_mutex, _promise, std::move (_f));
+		} else {
+			_wait_sync_run<decltype (_f), TRet> (_mutex, _promise, std::move (_f));
+		}
 		return _promise->get_future ();
 	}
 
@@ -283,27 +277,36 @@ public:
 private:
 	// private methods
 
-	template<typename F, typename... Args>
-	auto _run_until (std::chrono::system_clock::time_point _tp, F &&f, Args&&... args) -> std::future<decltype (f (args...))> {
-		using TRet = decltype (f (args...));
-		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f), std::forward<Args> (args)...));
-		[&] () {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
-				if (std::get<0> (m_timed_tasks [i]) > _tp) {
-					m_timed_tasks.insert (m_timed_tasks.begin () + i, std::make_tuple (_tp, [_task] () { (*_task)(); }));
-					return;
-				}
+	template<typename F>
+	auto _run_task_get_future (F &&_f) -> std::future<decltype (_f ())> {
+		std::unique_lock<std::recursive_mutex> ul (m_mutex, std::defer_lock);
+		auto _task = std::make_shared<std::packaged_task<decltype (_f ()) ()>> (_f);
+		auto _res = _task->get_future ();
+		ul.lock ();
+		m_tasks.emplace ([_task] () { (*_task)(); });
+		return _res;
+	}
+
+	template<typename F>
+	auto _run_timed_task_until (std::chrono::system_clock::time_point _tp, F &&f) -> std::future<decltype (f ())> {
+		using TRet = decltype (f ());
+		std::unique_lock<std::recursive_mutex> ul (m_mutex), std::defer_lock;
+		auto _task = std::make_shared<std::packaged_task<TRet ()>> (std::bind (std::forward<F> (f)));
+		ul.lock ();
+		for (size_t i = 0; i < m_timed_tasks.size (); ++i) {
+			if (std::get<0> (m_timed_tasks [i]) > _tp) {
+				m_timed_tasks.insert (m_timed_tasks.begin () + i, std::make_tuple (_tp, [_task] () { (*_task)(); }));
+				return _task->get_future ();
 			}
-			m_timed_tasks.push_back (std::make_tuple (_tp, [_task] () { (*_task)(); }));
-		} ();
+		}
+		m_timed_tasks.push_back (std::make_tuple (_tp, [_task] () { (*_task)(); }));
 		return _task->get_future ();
 	}
 
-	template <typename _Rep, typename _Period, typename F, typename... Args>
-	auto _run_for (const std::chrono::duration<_Rep, _Period> &_chr, F &&f, Args&&... args) -> std::future<decltype(f (args...))> {
-		auto _tp = std::chrono::system_clock::now () + _chr;
-		return _run_until (_tp, f, args...);
+	template <typename F>
+	auto _run_timed_task (F &&f) -> std::future<decltype(f ())> {
+		auto _tp = std::chrono::system_clock::now () + std::chrono::milliseconds (1);
+		return _run_timed_task_until (_tp, f);
 	}
 
 	bool _timed_trigger () {
@@ -312,33 +315,43 @@ private:
 		return std::chrono::system_clock::now () >= std::get<0> (m_timed_tasks [0]);
 	}
 
+	void _wait_all0 (std::shared_ptr<_futures_wrap0_t> _futures_wrap, std::shared_ptr<std::promise<void>> _promise) {
+		if (_futures_wrap->valid ()) {
+			_futures_wrap->get ();
+			_promise->set_value ();
+		} else {
+			_run_timed_task (std::bind (&taskpool_t::_wait_all0, this, _futures_wrap, _promise));
+		}
+	}
+
+	template<typename T>
+	void _wait_all (std::shared_ptr<_futures_wrap_t<T>> _futures_wrap, std::shared_ptr<std::promise<std::vector<T>>> _promise) {
+		if (_futures_wrap->valid ()) {
+			_promise->set_value (std::move (_futures_wrap->get ()));
+		} else {
+			_run_timed_task (std::bind (&taskpool_t::_wait_all<T>, this, _futures_wrap, _promise));
+		}
+	}
+
 	template<typename F>
 	void _wait_forward (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<decltype (f ())>> _promise) {
 		using TRet = decltype (f ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				_promise->set_value (std::forward<TRet> ((f) ()));
-			});
+			_future_wrap->get ();
+			_promise->set_value (std::forward<TRet> ((f) ()));
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
 	template<typename F>
 	void _wait_forward_noret (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				(f) ();
-				_promise->set_value ();
-			});
+			_future_wrap->get ();
+			(f) ();
+			_promise->set_value ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward_noret<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward_noret<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -346,27 +359,19 @@ private:
 	void _wait_forward (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<decltype (f (_future_wrap->get ()))>> _promise) {
 		using TRet = decltype (f (_future_wrap->get ()));
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_promise->set_value (std::forward<TRet> ((f) (_future_wrap->get ())));
-			});
+			_promise->set_value (std::forward<TRet> ((f) (_future_wrap->get ())));
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
 	template<typename F, typename T>
 	void _wait_forward_noret (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				(f) (_future_wrap->get ());
-				_promise->set_value ();
-			});
+			(f) (_future_wrap->get ());
+			_promise->set_value ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward_noret<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward_noret<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -374,34 +379,26 @@ private:
 	void _wait_forward2 (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<decltype (f ().get ())>> _promise) {
 		using TRet = decltype (f ().get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				std::future<TRet> _future2 = (f) ();
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
-				_wait_forward<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
-			});
+			_future_wrap->get ();
+			std::future<TRet> _future2 = (f) ();
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
+			_wait_forward<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward2<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward2<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
 	template<typename F>
 	void _wait_forward2_noret (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				std::future<void> _future2 = (f) ();
-				auto _future2_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future2));
-				auto _f2 = [] () {};
-				_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
-			});
+			_future_wrap->get ();
+			std::future<void> _future2 = (f) ();
+			auto _future2_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future2));
+			auto _f2 = [] () {};
+			_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward2_noret<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward2_noret<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -409,33 +406,25 @@ private:
 	void _wait_forward2 (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<decltype (f (_future_wrap->get ()).get ())>> _promise) {
 		using TRet = decltype (f (_future_wrap->get ()).get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				std::future<TRet> _future2 = (f) (_future_wrap->get ());
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
-				_wait_forward<decltype (_f2), T> (std::move (_f2), _future2_wrap, _promise);
-			});
+			std::future<TRet> _future2 = (f) (_future_wrap->get ());
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
+			_wait_forward<decltype (_f2), T> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward2<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward2<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
 	template<typename F, typename T>
 	void _wait_forward2_noret (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				std::future<void> _future2 = (f) ();
-				auto _future2_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future2));
-				auto _f2 = [] () {};
-				_wait_forward_noret<decltype (_f2), T> (std::move (_f2), _future2_wrap, _promise);
-			});
+			_future_wrap->get ();
+			std::future<void> _future2 = (f) ();
+			auto _future2_wrap = std::make_shared<_future_wrap_t<void>> (std::move (_future2));
+			auto _f2 = [] () {};
+			_wait_forward_noret<decltype (_f2), T> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_forward2_noret<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_forward2_noret<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -446,8 +435,7 @@ private:
 			_promise->set_value (std::move (_t));
 			_mutex->unlock ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run<F, TRet>, this, _mutex, _promise, std::move (f));
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run<F, TRet>, this, _mutex, _promise, std::move (f)));
 		}
 	}
 
@@ -458,8 +446,7 @@ private:
 			_promise->set_value ();
 			_mutex->unlock ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run_noret<F>, this, _mutex, _promise, std::move (f));
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run_noret<F>, this, _mutex, _promise, std::move (f)));
 		}
 	}
 
@@ -469,8 +456,7 @@ private:
 			_promise->set_value (std::move (f (std::move (t))));
 			_mutex->unlock ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run<F, T, TRet>, this, std::move (_mutex), std::move (_promise), std::move (f), std::move (t));
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run<F, T, TRet>, this, std::move (_mutex), std::move (_promise), std::move (f), std::move (t)));
 		}
 	}
 
@@ -481,8 +467,7 @@ private:
 			_promise->set_value ();
 			_mutex->unlock ();
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run_noret<F, T>, this, std::move (_mutex), std::move (_promise), std::move (f), std::move (t));
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run_noret<F, T>, this, std::move (_mutex), std::move (_promise), std::move (f), std::move (t)));
 		}
 	}
 
@@ -490,17 +475,13 @@ private:
 	void _wait_sync_run2 (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<decltype (f ().get ())>> _promise) {
 		using TRet = decltype (f ().get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				std::future<TRet> _future2 = (f) ();
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
-				_wait_forward<decltype (_f2), TRet> (std::move (_f2), _future2_wrap, _promise);
-			});
+			_future_wrap->get ();
+			std::future<TRet> _future2 = (f) ();
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
+			_wait_forward<decltype (_f2), TRet> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run2<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run2<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -508,17 +489,13 @@ private:
 	void _wait_sync_run2_noret (const F &f, std::shared_ptr<_future_wrap_t<void>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		using TRet = decltype (f ().get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				_future_wrap->get ();
-				std::future<TRet> _future2 = (f) ();
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] () {};
-				_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
-			});
+			_future_wrap->get ();
+			std::future<TRet> _future2 = (f) ();
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] () {};
+			_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run2_noret<F>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run2_noret<F>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -526,16 +503,12 @@ private:
 	void _wait_sync_run2 (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<decltype (f (_future_wrap->get()).get ())>> _promise) {
 		using TRet = decltype (f (_future_wrap->get ()).get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				std::future<TRet> _future2 = (f) (std::move (_future_wrap->get ()));
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
-				_wait_forward<decltype (_f2), TRet> (std::move (_f2), _future2_wrap, _promise);
-			});
+			std::future<TRet> _future2 = (f) (std::move (_future_wrap->get ()));
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] (TRet &&tret) { return std::forward<TRet> (tret); };
+			_wait_forward<decltype (_f2), TRet> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run2<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run2<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
@@ -543,16 +516,12 @@ private:
 	void _wait_sync_run2_noret (const F &f, std::shared_ptr<_future_wrap_t<T>> _future_wrap, std::shared_ptr<std::promise<void>> _promise) {
 		using TRet = decltype (f (_future_wrap->get ()).get ());
 		if (_future_wrap->valid ()) {
-			std::unique_lock<std::recursive_mutex> ul (m_mutex);
-			m_tasks.emplace ([=] () {
-				std::future<TRet> _future2 = (f) (std::move (_future_wrap->get ()));
-				auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
-				auto _f2 = [] () {};
-				_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
-			});
+			std::future<TRet> _future2 = (f) (std::move (_future_wrap->get ()));
+			auto _future2_wrap = std::make_shared<_future_wrap_t<TRet>> (std::move (_future2));
+			auto _f2 = [] () {};
+			_wait_forward_noret<decltype (_f2)> (std::move (_f2), _future2_wrap, _promise);
 		} else {
-			std::function<void ()> _func = std::bind (&taskpool_t::_wait_sync_run2_noret<F, T>, this, std::move (f), _future_wrap, _promise);
-			_run_for (std::chrono::milliseconds (1), _func);
+			_run_timed_task (std::bind (&taskpool_t::_wait_sync_run2_noret<F, T>, this, std::move (f), _future_wrap, _promise));
 		}
 	}
 
