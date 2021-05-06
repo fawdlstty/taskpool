@@ -11,7 +11,7 @@ Modern C++ 任务池，将作为纯同步调用方式实现完全等价于 async
 
 // Creates an object and specifies how many threads will handle the task pool's tasks
 // 创建对象，并指定由多少个线程来处理任务池的任务
-taskpool_t _pool { 1 };
+fa::taskpool_t _pool { 1 };
 
 // Perform a task and wait for the result
 // 执行一个任务，并等待结果
