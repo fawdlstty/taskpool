@@ -52,7 +52,7 @@ namespace fa {
 	public:
 		void set_value (const T &_val) { m_promise.set_value (_val); }
 		void set_value (T &&_val) { m_promise.set_value (std::move (_val)); }
-		future_t<T> &&get_future () { return std::move (m_promise.get_future ()); }
+		future_t<T> &&get_future () { return std::move (future_t<T> (std::move (m_promise.get_future ()))); }
 
 	private:
 		std::promise<T> m_promise;
