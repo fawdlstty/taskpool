@@ -85,6 +85,7 @@ namespace fa {
 	public:
 		future_t (const future_t<T> &_o) noexcept: m_data (_o.m_data) {}
 		future_t (std::shared_ptr<_future_temp_data_t<T>> _data) noexcept: m_data (_data) {}
+		future_t<T> &operator= (const future_t<T> &_o) noexcept { m_data = _o.m_data; return *this; }
 		static future_t<T> from_value (const T &t) { return future_t<T> (std::make_shared<_future_temp_data_t<T>> (t)); }
 		static future_t<T> from_value (T &&t) { return future_t<T> (std::make_shared<_future_temp_data_t<T>> (std::move (t))); }
 		bool peek () noexcept { return m_data->peek (); }
@@ -100,6 +101,7 @@ namespace fa {
 	public:
 		future_t (const future_t<void> &_o) noexcept: m_data (_o.m_data) {}
 		future_t (std::shared_ptr<_future_temp_data_t<void>> _data) noexcept: m_data (_data) {}
+		future_t<void> &operator= (const future_t<void> &_o) noexcept { m_data = _o.m_data; return *this; }
 		static future_t<void> from_value () {
 			auto _temp_data = std::make_shared<_future_temp_data_t<void>> ();
 			_temp_data->set ();
