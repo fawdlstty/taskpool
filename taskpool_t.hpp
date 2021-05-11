@@ -353,7 +353,7 @@ namespace fa {
 		// sync_run
 
 		template<typename F, typename... Args>
-		auto sync_run (std::shared_ptr<std::mutex> _mutex, F &&f, Args&&... args) -> future_t<decltype (f (args...))> {
+		auto sync_run (std::shared_ptr<std::recursive_mutex> _mutex, F &&f, Args&&... args) -> future_t<decltype (f (args...))> {
 			using TRet = decltype (f (args...));
 			std::shared_ptr<promise_t<TRet>> _promise = std::make_shared<promise_t<TRet>> ();
 			std::function<TRet ()> _f = std::bind (std::forward<F> (f), std::forward<Args> (args)...);
@@ -366,7 +366,7 @@ namespace fa {
 		}
 
 		template <typename F>
-		auto sync_after_run (future_t<void> &&_future, std::shared_ptr<std::mutex> _mutex, F &&f) -> future_t<decltype (f ())> {
+		auto sync_after_run (future_t<void> &&_future, std::shared_ptr<std::recursive_mutex> _mutex, F &&f) -> future_t<decltype (f ())> {
 			using TRet = decltype (f ());
 			auto _future_wrap = std::make_shared<future_t<void>> (std::move (_future));
 			std::shared_ptr<promise_t<TRet>> _promise = std::make_shared<promise_t<TRet>> ();
@@ -381,7 +381,7 @@ namespace fa {
 		}
 
 		template <typename T, typename F>
-		auto sync_after_run (future_t<T> &&_future, std::shared_ptr<std::mutex> _mutex, F &&f) -> future_t<decltype (f (_future.get ()))> {
+		auto sync_after_run (future_t<T> &&_future, std::shared_ptr<std::recursive_mutex> _mutex, F &&f) -> future_t<decltype (f (_future.get ()))> {
 			using TRet = decltype (f (_future.get ()));
 			auto _future_wrap = std::make_shared<future_t<T>> (std::move (_future));
 			std::shared_ptr<promise_t<TRet>> _promise = std::make_shared<promise_t<TRet>> ();
@@ -550,7 +550,7 @@ namespace fa {
 		}
 
 		template<typename F, typename TRet>
-		void _wait_sync_run (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<promise_t<TRet>> _promise, const F &f) {
+		void _wait_sync_run (std::shared_ptr<std::recursive_mutex> _mutex, std::shared_ptr<promise_t<TRet>> _promise, const F &f) {
 			if (_mutex->try_lock ()) {
 				TRet _t = f ();
 				_promise->set_value (std::move (_t));
@@ -561,7 +561,7 @@ namespace fa {
 		}
 
 		template<typename F>
-		void _wait_sync_run_noret (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<promise_t<void>> _promise, const F &f) {
+		void _wait_sync_run_noret (std::shared_ptr<std::recursive_mutex> _mutex, std::shared_ptr<promise_t<void>> _promise, const F &f) {
 			if (_mutex->try_lock ()) {
 				f ();
 				_promise->set_value ();
@@ -572,7 +572,7 @@ namespace fa {
 		}
 
 		template<typename F, typename T, typename TRet>
-		void _wait_sync_run (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<promise_t<TRet>> _promise, const F &f, const T &t) {
+		void _wait_sync_run (std::shared_ptr<std::recursive_mutex> _mutex, std::shared_ptr<promise_t<TRet>> _promise, const F &f, const T &t) {
 			if (_mutex->try_lock ()) {
 				_promise->set_value (std::move (f (std::move (t))));
 				_mutex->unlock ();
@@ -582,7 +582,7 @@ namespace fa {
 		}
 
 		template<typename F, typename T>
-		void _wait_sync_run_noret (std::shared_ptr<std::mutex> _mutex, std::shared_ptr<promise_t<void>> _promise, const F &f, const T &t) {
+		void _wait_sync_run_noret (std::shared_ptr<std::recursive_mutex> _mutex, std::shared_ptr<promise_t<void>> _promise, const F &f, const T &t) {
 			if (_mutex->try_lock ()) {
 				f (std::move (t));
 				_promise->set_value ();
